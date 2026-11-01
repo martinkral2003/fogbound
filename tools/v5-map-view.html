@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v5 map view</title>
+<script type="importmap">{ "imports": { "three": "../lib/three.module.min.js" } }</script>
+<style>html,body{margin:0;background:#111;overflow:hidden}canvas{width:100vw;height:100vh;display:block}#i{position:fixed;left:6px;top:6px;color:#fff;font:12px monospace}</style></head>
+<body><canvas id="gl"></canvas><div id="i"></div>
+<script type="module">
+// Terrain/world view of the generated compact map (MAP lane test page). Params: fog (density override, 0 = none), nomist=1, seed, x, z (focus), dist, pitch (deg), yaw (deg), t (time of day 0..1), top=1 (whole-map top view)
+import { generateWorld } from '../src/world.js';
+import { createWorldView } from '../src/worldview.js';
+const Q = new URLSearchParams(location.search);
+const seed = +Q.get('seed') || 1;
+const t0 = performance.now();
+const world = generateWorld(seed);
+const tGen = performance.now() - t0;
+const view = createWorldView(document.getElementById('gl'), world, {});
+const S = world.sites;
+let x = Q.has('x') ? +Q.get('x') : S.heroSpawns[0].x, z = Q.has('z') ? +Q.get('z') : S.heroSpawns[0].z;
+let dist = +Q.get('dist') || 60, pitch = (+Q.get('pitch') || 52) * Math.PI / 180, yaw = (+Q.get('yaw') || 0) * Math.PI / 180;
+if (Q.get('top')) { x = 0; z = 0; dist = 330; pitch = 89 * Math.PI / 180; view.camera.fov = 46; }
+const cam = view.camera;
+const y0 = world.heightAt(x, z);
+cam.position.set(x + Math.sin(yaw) * Math.cos(pitch) * dist, y0 + Math.sin(pitch) * dist, z + Math.cos(yaw) * Math.cos(pitch) * dist);
+cam.lookAt(x, y0 + 2, z);
+cam.far = 900; cam.updateProjectionMatrix();
+let frames = 0;
+const tick = () => { view.update(0.05, { x, z }, { phase: +Q.get('t') || 0.3 }); if (Q.has('fog')) view.scene.fog.density = +Q.get('fog'); if (Q.get('nomist')) for (const m of view.mists) m.visible = false; view.renderer.render(view.scene, cam); if (++frames < 4) requestAnimationFrame(tick); };
+tick();
+document.getElementById('i').textContent = `seed ${seed} gen ${tGen | 0} ms focus ${x | 0},${z | 0} dist ${dist} flip ${world.info.flip}`;
+window.__ready = true;
+</script></body></html>

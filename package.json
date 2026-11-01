@@ -1,0 +1,9 @@
+{
+  "name": "fogbound",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "mqtt": "^5.16.1"
+  }
+}

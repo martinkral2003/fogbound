@@ -1,0 +1,12 @@
+import { createGame, step } from '../src/sim.js';
+import { SIM_DT } from '../src/data.js';
+const st = createGame({ seed: 1, humans: [0] });
+const h = st.horde;
+console.log('ready', h.ready, 'path', Math.round(h.len), 'gates', h.gates.map(g => [g.id, g.tier, Math.round(g.x), Math.round(g.z), Math.round(g.maxHp)]));
+console.log('towns', st.towns.map(t => [t.id, t.name, t.kind, Math.round(t.x), Math.round(t.z), t.state]).join(' | '));
+console.log('sched', h.sched.map(s => [s.id, Math.round(s.D), s.T]).join(' | '), 'clock', JSON.stringify(h.clock.map(c=>c.map(Math.round))));
+console.log('world', st.world.sites && Object.keys(st.world.sites), 'half', (await import('../src/data.js')).WORLD);
+const t0 = Date.now();
+const NONE = [{}, {}, {}, {}];
+for (let i = 0; i < 30 * 120; i++) step(st, SIM_DT, NONE);
+console.log('2 min ms', Date.now() - t0, 'ents', st.ents.length, 'waves', h.waves.length, 'objective', JSON.stringify(st.objective));

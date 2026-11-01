@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FOGBOUND: HERO UI test</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="rpg.css">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: radial-gradient(ellipse at 50% 60%, #2a3330, #0b1118 70%); }
+  #rpg-root { position: fixed; inset: 0; }
+</style>
+</head>
+<body>
+<div id="rpg-root"></div>
+<script type="module">
+import { createRpgUI } from './src/rpg/ui/index.js';
+const q = new URLSearchParams(location.search);
+// real sim when it loads (and ?mock is absent); otherwise a mock state so the UI can be tested while the sim lanes are being rewritten
+let Core = null, st, mock = false;
+try { if (q.has('mock')) throw new Error('mock requested'); Core = await import('./src/rpg/core.js'); st = Core.createRpg({ rivals: 0, seed: +(q.get('seed') || 1337) }); }
+catch (e) { console.warn('using mock state:', e.message); const M = await import('./src/rpg/ui/testmock.js'); st = M.createMockRpg(+(q.get('seed') || 1337)); Core = { stepRpg: (s, dt) => M.stepMock(s, dt) }; mock = true; const S = await import('./src/rpg/ui/sim.js'); setTimeout(() => { S.sim.Core = { nearestInteractable: M.nearestMock }; }, 500); }
+window.__mock = mock;
+const cmds = [];
+const keys = {};
+const game = {
+  st, queue: (c) => cmds.push(c), player: () => st.player,
+  toast: (t, k) => ui.handleEvents([{ type: 'msg', actor: st.player.id, text: t, kind: k }]),
+  controls: {},
+  onNewMatch: () => console.log('newMatch'), onSpectate: () => console.log('spectate'), onResume: () => console.log('resume'),
+};
+const ui = createRpgUI(document.getElementById('rpg-root'), game);
+window.__ui = ui; window.__st = st; window.__game = game;
+addEventListener('keydown', (e) => {
+  if (ui.keyHandler(e)) { e.preventDefault(); return; }
+  keys[e.code] = true;
+  const m = /^Digit([1-8])$/.exec(e.code);
+  if (m) slot = +m[1] - 1;
+  if (e.code === 'KeyE' || e.code === 'KeyF') interact = true;
+});
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+let slot = -1, interact = false, yaw = st.player ? st.player.yaw : 0;
+const DT = 1 / 30; let acc = 0, last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now; acc += dt;
+  while (acc >= DT) {
+    acc -= DT;
+    if (ui.isModalOpen()) { cmds.length; }
+    const mx = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0), mz = (keys.KeyS ? 1 : 0) - (keys.KeyW ? 1 : 0);
+    if (keys.KeyQ) yaw -= 0.05; if (keys.KeyR) yaw += 0.05;
+    const inp = { mx, mz, yaw, pitch: 0, sprint: !!keys.ShiftLeft, crouch: false, jump: false, attack: !!keys.Space, attackPressed: !!keys.Space, heavy: false, block: false, dodge: false, interact, slot, lockId: 0, cmds: cmds.splice(0) };
+    slot = -1; interact = false;
+    if (st.player) st.player.id && stepOnce(inp);
+    ui.handleEvents(st.events.splice(0));
+  }
+  ui.update(dt);
+  requestAnimationFrame(frame);
+}
+function stepOnce(inp) { Core.stepRpg(st, DT, { [st.player.id]: inp }); }
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

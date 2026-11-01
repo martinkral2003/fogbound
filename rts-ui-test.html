@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FOGBOUND: DOMINION test page</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="rts.css">
+<script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="loading" class="hidden"><div class="menuBox small"><h2>FOGBOUND</h2><div id="loadText">Raising the island...</div><div class="lbar"><i id="loadBar"></i></div></div></div>
+<script type="module">
+// Standalone host for the RTS mode: rts-ui-test.html?start=0&ai=3&seed=1337 (without start= the skirmish setup screen shows)
+const m = await import('./src/rts/main.js');
+await m.startRtsMode({ params: new URLSearchParams(location.search) });
+</script>
+</body>
+</html>

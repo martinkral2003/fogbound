@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b1118">
+<title>Fogbound</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script>
+// drop any service worker / caches left over from earlier versions of this project on this origin
+if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistrations().then((rs) => rs.forEach((r) => r.unregister()));
+if (window.caches) caches.keys().then((ks) => ks.forEach((k) => caches.delete(k)));
+</script>
+<script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="floaters"></div>
+
+<div id="hud" class="hidden">
+  <div id="toasts"></div>
+  <div id="mmWrap" class="ui"><canvas id="minimap" width="200" height="200"></canvas><div id="mmKeys"><button id="mapBtn" class="btn small" title="Full-screen map (M)">Map <kbd>M</kbd></button> <kbd>F1</kbd> help</div></div>
+</div>
+
+<div id="menu">
+  <div class="menuBox">
+    <h1>FOGBOUND</h1>
+    <p class="sub">The world outside the capital is deadly. Survive, grow strong, escape when Highmark falls, and destroy the fortress in the ruins.</p>
+    <div id="heroStart" class="hidden">
+      <p class="sub">One hero. Ten fates. The Dread Fog is closing in and only one of you walks out.</p>
+      <div class="row center"><button id="heroBtn" class="btn gold big">Enter the island</button></div>
+    </div>
+    <div id="cards"></div>
+    <div id="selInfo"></div>
+    <div id="diffRow" class="row center warOnly"><span class="dlabel">Difficulty</span><span id="diffBtns"></span></div>
+    <div id="diffInfo" class="warOnly"></div>
+    <div id="matchRow" class="row center warOnly"><span class="dlabel">Match</span><button id="matchCoop" class="btn mode sel" data-m="coop">Co-op (allies vs demons)</button><button id="matchWar" class="btn mode" data-m="war">Rivalry (2 vs 2 vs demons)</button></div>
+    <div id="sideRow" class="row center warOnly hidden"><span class="dlabel">Your side</span><button id="sideA" class="btn mode sel" data-s="0">Dawn Banner</button><button id="sideB" class="btn mode" data-s="1">Night Banner</button></div>
+    <div class="row center">
+      <button id="startBtn" class="btn gold big">Start</button>
+    </div>
+    <div class="how3"><b>1</b> Follow the gold arrow &middot; <b>2</b> Fight, level up, pick a card &middot; <b>3</b> Shop and hire in towns &middot; <kbd>WASD</kbd> move &middot; <kbd>Left-click</kbd> attack &middot; <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd> abilities &middot; <kbd>Q</kbd><kbd>E</kbd><kbd>R</kbd> potions</div>
+    <div id="modeSwitch" class="row center"><button id="modeWarlord" class="btn mode sel">Demon Gates</button><button id="modeHero" class="btn mode">Hero (RPG)</button><button id="modeRts" class="btn mode">Dominion (RTS)</button></div>
+  </div>
+</div>
+
+<div id="loading" class="hidden"><div class="menuBox small"><h2>FOGBOUND</h2><div id="loadText">Opening the gates...</div><div class="lbar"><i id="loadBar"></i></div></div></div>
+
+<div id="pause" class="hidden"><div class="menuBox small"><h2>Paused</h2>
+  <button id="resumeBtn" class="btn gold">Resume</button><button id="restartBtn" class="btn">Abandon match</button></div></div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>

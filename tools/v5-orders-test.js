@@ -1,0 +1,32 @@
+// Co-op orders: gather / attack here / follow / free change what the allied AI heroes do. node tools/v5-orders-test.js
+import { createGame, step } from '../src/sim.js';
+import { createAI, aiInput } from '../src/ai.js';
+import { SIM_DT } from '../src/data.js';
+let bad = 0; const ok = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) bad++; };
+const st = createGame({ seed: 4, humans: [0] });
+const ais = st.teams.map((t) => createAI(st, t.id));
+let cmds = [];
+const run = (secs) => { for (let i = 0; i < secs / SIM_DT; i++) { step(st, SIM_DT, st.teams.map((t) => (t.id === 0 ? { cmds: i === 0 ? cmds : [], mx: 0, mz: 0, aimX: 0, aimZ: 0 } : t.id < 4 ? aiInput(st, ais[t.id], SIM_DT) : {}))); st.events.length = 0; cmds = []; } };
+const h = st.teams[0].hero, allies = () => [1, 2, 3].map((i) => st.teams[i].hero);
+const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
+run(20);
+cmds = [{ t: 'order', kind: 'gather', x: h.x, z: h.z }]; run(1);
+ok(st.orders && st.orders.kind === 'gather', 'gather order stored');
+run(25);
+const dg = allies().map((a) => dist(a, h));
+console.log('   distances to the human after gather:', dg.map((d) => d.toFixed(0)).join(', '));
+ok(dg.every((d) => d < 22), 'all allies gathered around the human');
+const cap = st.towns.find((t) => t.kind === "capital"), target = { x: cap.x + 60, z: cap.z }; // out of the east gate, down the ramp
+cmds = [{ t: 'order', kind: 'attack', x: target.x, z: target.z }]; run(1);
+ok(st.orders.kind === 'attack', 'attack order stored');
+run(30);
+const da = allies().map((a) => dist(a, target));
+console.log('   distances to the attack point:', da.map((d) => d.toFixed(0)).join(', '));
+ok(da.filter((d) => d < 30).length >= 2, 'most allies went to the attack point');
+cmds = [{ t: 'order', kind: 'free' }]; run(1);
+ok(st.orders.kind === 'free', 'free order clears');
+cmds = [{ t: 'order', kind: 'follow' }]; run(25);
+const df = allies().map((a) => dist(a, h));
+console.log('   distances to the human after follow:', df.map((d) => d.toFixed(0)).join(', '));
+ok(df.filter((d) => d < 45).length >= 2, 'allies follow the human');
+process.exit(bad ? 1 : 0);
