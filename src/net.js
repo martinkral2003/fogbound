@@ -1,99 +1,136 @@
-// v0.7 MQTT transport (host-authoritative). NOT WIRED IN YET on purpose: nothing imports this module. Written so the next
-// session can wire it with a live two-browser-tab test instead of me guessing blind at the protocol.
+// v0.7 MQTT multiplayer: deterministic LOCKSTEP, not host-broadcast. Both peers run the FULL simulation locally and stay
+// in sync by exchanging only player INPUTS, never game state. This works because the sim never touches Math.random()
+// (grepped 2026-11-01: it only appears in render.js/worldview.js/towns_view.js, all visual-only effects that don't feed
+// back into st) - everything that affects the outcome goes through the seeded st.rng(). So two peers calling createGame()
+// with the same seed/options and feeding step() the same input sequence in the same order produce identical results,
+// with no need to ever serialize the (large: nav grid, every building/unit) game state over the wire.
 //
-// Pattern mirrors ../gamee/game.js (read 2026-11-01, reused not reinvented): a namespaced MQTT topic tree under a room
-// code, the host subscribes to 'join'/'cmd'/'leave' and publishes a retained 'lobby', everyone else subscribes to 'lobby'
-// and publishes 'join'/'leave'/'cmd'. Design v0.7 first-pass scope: YOU always host (you run createGame()+step() and
-// broadcast it), one friend joins with a room code, AI fills every other hero slot. Full host-or-join symmetry and >2
-// humans are later work (see CLAUDE.md Design v0.7 build plan, row 9).
+// This is simpler than ../gamee/game.js's pattern (host runs the sim, broadcasts a hand-picked per-frame snapshot) because
+// that snapshot would be a real design problem here (see the TODO this file used to carry); lockstep sidesteps it.
 //
-// What a human player's per-tick input already looks like (controls.js, src/main.js:102 `step(st, dt, inputs)`):
-//   { mx, mz, aimX, aimZ, atk, casts: [slot,...], charge, tele, repair, cmds: [...] }
-// That object is exactly what a client should publish on 'cmd' and what the host drops into `inputs[teamId]` in place
-// of `aiInput(...)` for that team — see main.js's loop() for how `inputs` is built today. st.humans (opts.humans to
-// createGame) already supports more than one human-controlled team; only this transport was missing.
+// IMPORTANT, found 2026-11-01 while testing this: the sim is NOT perfectly deterministic in practice, despite using no
+// raw Math.random(). Two independent createGame(same seed) + step() runs fed the IDENTICAL input sequence (verified with
+// zero networking involved at all - see tools/v7-netplay-test.mjs's local-double-run check) can still diverge by about a
+// meter of hero position after a few seconds, usually traced to ONE AI-controlled team taking a slightly different path
+// (root cause not found - not Date.now()/performance.now(), not Math.random(); a stable .sort() by distance is the only
+// sort in ai_combat.js's target selection, so the actual source is still open). This is a pre-existing sim/ai.js property,
+// not something this networking layer causes. Mitigation: publishSync() below is a cheap, periodic, host-authoritative
+// correction for just the 4 heroes' x/z/hp, so visible drift self-corrects every few seconds instead of compounding for
+// an entire match. It does NOT correct monsters/servants/buildings - full-world drift is still possible and unfixed.
+// Whoever wants true bit-exact lockstep should root-cause the actual divergence source first (start from the repro in
+// tools/v7-netplay-test.mjs's companion local test) rather than trust this comment's guesses.
 //
-// NOT in this file (left for the wiring session, needs a live two-tab test to get right rather than guessed):
-//   - state snapshot serialization for the host -> clients broadcast. `st` is large (nav grid, all buildings/units);
-//     do not JSON.stringify(st) wholesale. Likely answer: reuse whatever per-frame "view model" render.js/ui.js already
-//     read off st each frame (they can't be reading the whole thing either) and publish THAT, trimmed further if it's
-//     still too big for a free broker at the tick rate we want. Measure actual payload size before picking a rate.
-//   - client-side prediction/interpolation of the broadcast snapshots (gamee's C.snaps/C.pred pattern is the reference).
-//   - the lobby/menu screen itself (room code entry, host/join choice, faction pick for Design v0.7 competitive mode).
-//   - reconnect-into-the-same-match behaviour if a client's tab drops mid-game.
+// Protocol, topics under `fogbound-<room>/`:
+//   lobby  (retained) - host publishes {players:[{id,name,bg}], ...}. Clients subscribe, never publish it.
+//   join / leave        - a client announces itself to the host / leaving. Host only subscribes.
+//   start  (retained) - host publishes {seed, bgs, diff, factions, humans} ONCE, when both sides are ready. Both peers
+//                        then call createGame with THESE EXACT options (humans = the two hero team ids being networked).
+//   cmd                 - EITHER side publishes {id, team, tick, input} every sim tick, qos 1 (the public broker retries
+//                          delivery instead of silently dropping a lost packet, which would otherwise stall the match).
 //
-// Requires the mqtt.js browser build as a global `mqtt` (gamee loads it via <script src="https://unpkg.com/mqtt/dist/mqtt.min.js">
-// in index.html). Not vendored here yet (lib/ only has Three.js) - add the same <script> tag, or vendor it, when wiring.
+// Lockstep mechanics: each session keeps a per-tick input buffer (tick -> {teamId: input}). Every sim tick it (a)
+// publishes its OWN hero team's live input for tick (localTick + DELAY) and increments localTick, and (b) the caller
+// only steps the sim for `simTick` once hasTick(simTick, humanTeams) is true (AI teams are never sent - both sides
+// compute aiInput() locally and identically). DELAY ticks (default 5, ~167ms at the sim's 30Hz) of input lag absorb
+// normal broker latency/jitter so the match basically never has to pause; hasTick() returning false IS a real stall
+// (peer send was late/lost even past the delay budget) and the caller should show a "waiting for <peer>" indicator
+// rather than guess at the missing input.
+//
+// Usage (see main.js for the actual wiring): one session per tab. Host calls connect(code,true), then publishLobby()
+// as players join, then startGame(opts) once ready. The client calls connect(code,false) and waits for onStart. Both
+// sides then createGame(startOpts), call beginLockstep(myTeamId, startOpts.humans), and each sim tick: queueLocalInput
+// (controls.input) once, then only call step() when hasTick(simTick, humanTeams) - pulling the per-team inputs array
+// from inputsAt(simTick, st.teams, humanTeams, aiFn).
 
-const BROKER = () => new URLSearchParams(location.search).get('broker') || 'wss://broker.emqx.io:8084/mqtt';
-const NS = 'fogbound-';
-export const CMD_HZ = 20; // client -> host input publish rate; gamee uses 50ms (20Hz) for the same reason: responsive enough, cheap on a free broker
-
-// one transport per tab (you are either the host or a client, never both); S.cmds[teamId] = last input received for that team (host only)
-const S = { c: null, id: Math.random().toString(36).slice(2, 10), code: null, base: null, host: false, cmds: {}, cmdT: {}, timer: 0 };
-
-function pub(topic, obj, retain) {
-  if (!S.c) return;
-  S.c.publish(S.base + topic, obj == null ? '' : JSON.stringify(obj), { retain: !!retain, qos: 0 });
-}
+export const DELAY = 9; // ticks of input lag (~300ms at 1/30s) - must comfortably exceed BATCH_EVERY+WINDOW below
+const BATCH_EVERY = 3; // send a 'cmd' message every N ticks, not every tick (public brokers rate-limit/drop a 30/s-per-peer stream)
+const WINDOW = 6;       // ...but each message repeats the last WINDOW ticks, so losing any ONE message still leaves no gap
+const NEUTRAL_INPUT = { mx: 0, mz: 0, aimX: 0, aimZ: 0, atk: false, casts: [], charge: false, tele: false, repair: false, cmds: [] };
 
 /**
- * Join or host a room.
- * @param {string} code 4-letter room code (any short string works; keep it short so it's easy to say out loud)
- * @param {boolean} asHost true = you run the sim and broadcast it (today's only supported role)
- * @param {object} cbs callbacks, all optional:
- *   onJoin(msg)   a client announced itself                 (host only; msg = whatever the client published on 'join')
- *   onLeave(msg)  a client left                              (host only)
- *   onCmd(teamId, input) a client's input for a specific hero team (host only; wire teamId yourself via your own 'join' payload - this module does not assign teams)
- *   onLobby(msg)  the host's retained room/lobby state        (client only)
- *   onState(msg)  a host's broadcast snapshot                 (client only)
+ * Create one multiplayer session (one per tab/process: you are either the host or a client, never both).
+ * opts.mqtt: the mqtt.js client lib - defaults to the global `mqtt` (the browser <script> build); pass the npm
+ *   `mqtt` package explicitly for a Node-side test harness (see tools/v7-netplay-test.mjs).
+ * opts.broker: overrides the broker URL (defaults to ?broker= in the page URL, then the public EMQX broker).
+ * opts.id: this peer's client id (defaults to a random string).
  */
-export function connect(code, asHost, cbs = {}) {
-  disconnect();
-  Object.assign(S, { code, base: NS + code + '/', host: !!asHost, cmds: {}, cmdT: {} });
-  const opts = { clientId: 'fb_' + S.id, clean: true, reconnectPeriod: 2000, connectTimeout: 8000 };
-  if (asHost) opts.will = { topic: S.base + 'lobby', payload: '', retain: true, qos: 0 }; // if the host's tab dies, clear the retained lobby so clients see the room is gone
-  const c = S.c = mqtt.connect(BROKER(), opts); // `mqtt` = the global from the mqtt.js browser build (see file header)
-  c.on('connect', () => {
-    if (asHost) c.subscribe([S.base + 'join', S.base + 'cmd', S.base + 'leave']);
-    else c.subscribe(S.base + 'lobby');
-  });
-  c.on('message', (topic, payload) => {
-    let m = null;
-    try { if (payload.length) m = JSON.parse(payload.toString()); } catch { return; }
-    const t = topic.slice(S.base.length);
-    if (t === 'join' && cbs.onJoin) cbs.onJoin(m);
-    else if (t === 'leave' && cbs.onLeave) cbs.onLeave(m);
-    else if (t === 'cmd' && m) { if (m.team !== undefined) { S.cmds[m.team] = m.input; S.cmdT[m.team] = performance.now(); } if (cbs.onCmd) cbs.onCmd(m.team, m.input); }
-    else if (t === 'lobby' && cbs.onLobby) cbs.onLobby(m);
-    else if (t === 'state' && cbs.onState) cbs.onState(m);
-  });
-  return S;
-}
+export function createSession(opts = {}) {
+  const mqttLib = opts.mqtt || globalThis.mqtt;
+  const broker = opts.broker || (typeof location !== 'undefined' ? new URLSearchParams(location.search).get('broker') : null) || 'wss://broker.emqx.io:8084/mqtt';
+  const S = { c: null, id: opts.id || Math.random().toString(36).slice(2, 10), code: null, base: null, host: false, localTeam: -1, localTick: 0, buf: new Map(), started: false, delay: opts.delay || DELAY, sendWin: [], sinceSend: 0 };
 
-export function disconnect() {
-  if (S.timer) { clearInterval(S.timer); S.timer = 0; }
-  if (S.c) { if (!S.host && S.base) pub('leave', { id: S.id }); S.c.end(true); S.c = null; }
-}
+  function pub(topic, obj, o = {}) {
+    if (!S.c) return;
+    S.c.publish(S.base + topic, obj == null ? '' : JSON.stringify(obj), { retain: !!o.retain, qos: o.qos || 0 });
+  }
+  function bufAt(tick) { let m = S.buf.get(tick); if (!m) { m = {}; S.buf.set(tick, m); } return m; }
 
-/** host only: publish the retained lobby/room state (whatever shape your menu needs - players, settings, status) */
-export function publishLobby(state) { if (S.host) pub('lobby', state, true); }
-/** host only: broadcast a state snapshot to clients (see the serialization TODO at the top of this file) */
-export function publishState(snapshot) { if (S.host) pub('state', snapshot); }
-/** client only: announce yourself to the host so it can assign you a hero team */
-export function sendJoin(info) { if (!S.host) pub('join', { id: S.id, ...info }); }
-export function sendLeave() { if (!S.host) pub('leave', { id: S.id }); }
-/**
- * client only: start publishing your controls.input struct on CMD_HZ. getInput() should return the live
- * `controls.input` object (see src/controls.js) - call this once after you know which hero team you were assigned.
- */
-export function startSendingInput(teamId, getInput) {
-  if (S.host) return;
-  if (S.timer) clearInterval(S.timer);
-  S.timer = setInterval(() => pub('cmd', { id: S.id, team: teamId, input: getInput() }), 1000 / CMD_HZ);
-}
-/** host only: the most recent input received for a hero team, or `fallback` (pass your aiInput() result) if it's missing/stale */
-export function inputFor(teamId, fallback, maxAgeMs = 500) {
-  const t = S.cmdT[teamId];
-  return t !== undefined && performance.now() - t <= maxAgeMs ? S.cmds[teamId] : fallback;
+  /** cbs: onLobby(msg) [client], onJoin(msg)/onLeave(msg) [host], onStart(msg) [both - call createGame + beginLockstep from here] */
+  function connect(code, asHost, cbs = {}) {
+    disconnect();
+    Object.assign(S, { code, base: `fogbound-${code}/`, host: !!asHost, localTick: 0, buf: new Map(), started: false });
+    const copts = { clientId: 'fb_' + S.id, clean: true, reconnectPeriod: 2000, connectTimeout: 8000 };
+    if (asHost) copts.will = { topic: S.base + 'lobby', payload: '', retain: true, qos: 0 };
+    const c = S.c = mqttLib.connect(broker, copts);
+    c.on('error', (e) => { if (cbs.onError) cbs.onError(e); });
+    c.on('close', () => { if (cbs.onClose) cbs.onClose(); });
+    c.on('offline', () => { if (cbs.onOffline) cbs.onOffline(); });
+    c.on('reconnect', () => { if (cbs.onReconnect) cbs.onReconnect(); });
+    c.on('connect', () => {
+      c.subscribe([S.base + 'cmd', S.base + 'start', S.base + 'sync']);
+      if (asHost) c.subscribe([S.base + 'join', S.base + 'leave']);
+      else { c.subscribe(S.base + 'lobby'); pub('join', { id: S.id, ...cbs.joinInfo }, { retain: true }); } // retained: survives a host that subscribes a moment late
+    });
+    c.on('message', (topic, payload) => {
+      let m = null;
+      try { if (payload.length) m = JSON.parse(payload.toString()); } catch { return; }
+      const t = topic.slice(S.base.length);
+      if (t === 'cmd') { if (m && m.id !== S.id && m.items) for (const it of m.items) bufAt(it.tick)[m.team] = it.input; }
+      else if (t === 'start') { if (m && !S.started) { S.started = true; if (cbs.onStart) cbs.onStart(m); } }
+      else if (t === 'sync') { if (m && m.id !== S.id && cbs.onSync) cbs.onSync(m); }
+      else if (t === 'lobby' && cbs.onLobby) cbs.onLobby(m);
+      else if (t === 'join' && cbs.onJoin) cbs.onJoin(m);
+      else if (t === 'leave' && cbs.onLeave) cbs.onLeave(m);
+    });
+    return S;
+  }
+  function disconnect() { if (S.c) { if (!S.host && S.base) pub('leave', { id: S.id }); S.c.end(true); S.c = null; } }
+
+  /** host only: publish the retained lobby/room state (players, settings - whatever your menu needs) */
+  function publishLobby(state) { if (S.host) pub('lobby', state, { retain: true }); }
+  /** host only, ONCE: opts = {seed, bgs, diff, factions, humans} - both peers createGame() with this exact object */
+  function startGame(gopts) { if (S.host) pub('start', gopts, { retain: true }); }
+
+  /** host only: broadcast a small authoritative correction (see the determinism note at the top of this file) -
+   * pass [{team, x, z, hp}, ...] for the hero teams. Call this every few seconds, not every tick (it's a safety
+   * net for slow drift, not the primary sync mechanism - that's the input lockstep above). */
+  function publishSync(heroes) { if (S.host) pub('sync', { id: S.id, heroes }); }
+
+  /** call right after createGame(), before the first step() */
+  function beginLockstep(localTeam, humanTeams) {
+    S.localTeam = localTeam; S.localTick = 0; S.buf = new Map();
+    for (let t = 0; t < S.delay; t++) for (const team of humanTeams) bufAt(t)[team] = NEUTRAL_INPUT;
+  }
+  /** call once per sim tick BEFORE stepping, with the live (mutable) input struct for your own hero (src/controls.js) */
+  function queueLocalInput(liveInput) {
+    const tick = S.localTick++ + S.delay, snap = JSON.parse(JSON.stringify(liveInput)); // plain-object snapshot: liveInput mutates in place every frame
+    bufAt(tick)[S.localTeam] = snap;
+    S.sendWin.push({ tick, input: snap });
+    if (S.sendWin.length > WINDOW) S.sendWin.shift();
+    if (++S.sinceSend >= BATCH_EVERY) { S.sinceSend = 0; pub('cmd', { id: S.id, team: S.localTeam, items: S.sendWin.slice() }); }
+  }
+  /** true once every human team's input for `tick` is buffered (so step() can safely run for it) */
+  function hasTick(tick, humanTeams) { const m = S.buf.get(tick); return !!m && humanTeams.every((t) => m[t] !== undefined); }
+  /** the full per-team inputs array for `tick` (human teams from the buffer, others via aiFn(teamId)); frees that tick's buffer entry */
+  function inputsAt(tick, teams, humanTeams, aiFn) {
+    const m = S.buf.get(tick) || {};
+    const out = teams.map((t) => (humanTeams.includes(t.id) ? m[t.id] : aiFn(t.id)));
+    S.buf.delete(tick);
+    return out;
+  }
+
+  return {
+    connect, disconnect, publishLobby, startGame, publishSync, beginLockstep, queueLocalInput, hasTick, inputsAt,
+    get id() { return S.id; }, get started() { return S.started; }, get host() { return S.host; },
+  };
 }

@@ -13,6 +13,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistrations().the
 if (window.caches) caches.keys().then((ks) => ks.forEach((k) => caches.delete(k)));
 </script>
 <script type="importmap">{ "imports": { "three": "./lib/three.module.min.js" } }</script>
+<script src="https://unpkg.com/mqtt@5.16.1/dist/mqtt.min.js"></script>
 </head>
 <body>
 <canvas id="gl"></canvas>
@@ -37,6 +38,8 @@ if (window.caches) caches.keys().then((ks) => ks.forEach((k) => caches.delete(k)
     <div id="diffInfo" class="warOnly"></div>
     <div id="matchRow" class="row center warOnly"><span class="dlabel">Match</span><button id="matchCoop" class="btn mode sel" data-m="coop">Co-op (allies vs demons)</button><button id="matchWar" class="btn mode" data-m="war">Rivalry (2 vs 2 vs demons)</button></div>
     <div id="sideRow" class="row center warOnly hidden"><span class="dlabel">Your side</span><button id="sideA" class="btn mode sel" data-s="0">Dawn Banner</button><button id="sideB" class="btn mode" data-s="1">Night Banner</button></div>
+    <div id="mpRow" class="row center warOnly"><span class="dlabel">Play with a friend</span><button id="hostBtn" class="btn mode">Host</button><input id="roomCode" maxlength="4" placeholder="CODE" style="width:4.5em;text-transform:uppercase;text-align:center"><button id="joinBtn" class="btn mode">Join</button></div>
+    <div id="mpStatus" class="warOnly" style="min-height:1.2em"></div>
     <div class="row center">
       <button id="startBtn" class="btn gold big">Start</button>
     </div>
