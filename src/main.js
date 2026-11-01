@@ -135,7 +135,9 @@ async function start(bg, online) {
   game.ui.toast(st.war ? 'Rivalry: the other banner is a real enemy, not just the demons. Fight them for the towns, or race them to the gates.' : 'Follow the gold arrow. Close the Demon Gates before the capital falls.', 'big');
   $('resumeBtn').onclick = () => game.togglePause();
   $('restartBtn').onclick = () => location.reload();
-  document.addEventListener('visibilitychange', () => { if (document.hidden && !game.paused) game.togglePause(); });
+  // auto-pause on tab-hidden is singleplayer-only: in an online match, pausing silently stops this peer's input
+  // entirely, which just freezes the OTHER player (they stall waiting for a tick that will never arrive).
+  document.addEventListener('visibilitychange', () => { if (document.hidden && !game.paused && !game.online) game.togglePause(); });
   // compile shaders and upload textures now (one real frame) instead of hitching the first seconds of play
   await stage('Lighting the fog...', 85, () => { game.controls.update(0.016, game.renderer); game.renderer.frame(st, 1, 0.016, game.controls.view()); game.controls.clearEdges(); });
   $('hud').classList.remove('hidden');
